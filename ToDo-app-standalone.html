@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Bitácora de tareas</title>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: #1B2430; }
+  * { box-sizing: border-box; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+const STORAGE_KEY = "field-log-tasks";
+const getTodayKey = () => new Date().toISOString().slice(0, 10);
+
+const CATEGORIES = {
+  General: "#5C6B7A",
+  Trabajo: "#4C7A7A",
+  Personal: "#B8895C",
+  Casa: "#7A8C4C",
+};
+
+const makeId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+// Reemplazo simple de localStorage con la misma forma que window.storage,
+// para poder reusar la misma lógica de guardado/carga.
+const storage = {
+  get: async (key) => {
+    const raw = window.localStorage.getItem(key);
+    return raw ? { key, value: raw } : null;
+  },
+  set: async (key, value) => {
+    window.localStorage.setItem(key, value);
+    return { key, value };
+  },
+};
+
+function FieldLog() {
+  const [tasks, setTasks] = useState([]);
+  const [draft, setDraft] = useState("");
+  const [draftCategory, setDraftCategory] = useState("General");
+  const [filter, setFilter] = useState("all");
+  const [loaded, setLoaded] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [editingText, setEditingText] = useState("");
+  const [subtaskDrafts, setSubtaskDrafts] = useState({});
+  const [dragId, setDragId] = useState(null);
+  const hasLoadedRef = useRef(false);
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const result = await storage.get(STORAGE_KEY);
+        const todayKey = getTodayKey();
+        if (result && result.value) {
+          const data = JSON.parse(result.value);
+          if (data.date === todayKey) {
+            const normalized = (data.tasks || []).map((t) => ({
+              id: t.id ?? makeId(),
+              text: t.text ?? "",
+              done: t.done ?? false,
+              priority: t.priority ?? false,
+              category: t.category ?? "General",
+              note: t.note ?? "",
+              subtasks: t.subtasks ?? [],
+              expanded: t.expanded ?? false,
+            }));
+            setTasks(normalized);
+          } else {
+            setTasks([]);
+          }
+        }
+      } catch (e) {
+        setTasks([]);
+      } finally {
+        hasLoadedRef.current = true;
+        setLoaded(true);
+      }
+    };
+    load();
+  }, []);
+
+  useEffect(() => {
+    if (!hasLoadedRef.current) return;
+    storage.set(STORAGE_KEY, JSON.stringify({ date: getTodayKey(), tasks })).catch(() => {});
+  }, [tasks]);
+
+  const addTask = () => {
+    const text = draft.trim();
+    if (!text) return;
+    setTasks([
+      ...tasks,
+      { id: makeId(), text, done: false, priority: false, category: draftCategory, note: "", subtasks: [], expanded: false },
+    ]);
+    setDraft("");
+  };
+
+  const updateTask = (id, patch) => setTasks(tasks.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+  const removeTask = (id) => setTasks(tasks.filter((t) => t.id !== id));
+
+  const startEdit = (task) => { setEditingId(task.id); setEditingText(task.text); };
+  const commitEdit = (id) => {
+    const text = editingText.trim();
+    if (text) updateTask(id, { text });
+    setEditingId(null);
+    setEditingText("");
+  };
+
+  const addSubtask = (taskId) => {
+    const text = (subtaskDrafts[taskId] || "").trim();
+    if (!text) return;
+    const task = tasks.find((t) => t.id === taskId);
+    updateTask(taskId, { subtasks: [...task.subtasks, { id: makeId(), text, done: false }] });
+    setSubtaskDrafts({ ...subtaskDrafts, [taskId]: "" });
+  };
+
+  const toggleSubtask = (taskId, subId) => {
+    const task = tasks.find((t) => t.id === taskId);
+    updateTask(taskId, { subtasks: task.subtasks.map((s) => (s.id === subId ? { ...s, done: !s.done } : s)) });
+  };
+
+  const removeSubtask = (taskId, subId) => {
+    const task = tasks.find((t) => t.id === taskId);
+    updateTask(taskId, { subtasks: task.subtasks.filter((s) => s.id !== subId) });
+  };
+
+  const handleDrop = (targetId) => {
+    if (dragId === null || dragId === targetId) return;
+    const fromIndex = tasks.findIndex((t) => t.id === dragId);
+    const toIndex = tasks.findIndex((t) => t.id === targetId);
+    const reordered = [...tasks];
+    const [moved] = reordered.splice(fromIndex, 1);
+    reordered.splice(toIndex, 0, moved);
+    setTasks(reordered);
+    setDragId(null);
+  };
+
+  const visibleTasks = tasks
+    .filter((t) => (filter === "pending" ? !t.done : filter === "done" ? t.done : true))
+    .sort((a, b) => (b.priority === a.priority ? 0 : b.priority ? 1 : -1));
+
+  const totalCount = tasks.length;
+  const doneCount = tasks.filter((t) => t.done).length;
+  const pending = totalCount - doneCount;
+  const progressPct = totalCount === 0 ? 0 : Math.round((doneCount / totalCount) * 100);
+  const today = new Date().toLocaleDateString("es-AR", { weekday: "long", day: "numeric", month: "long" });
+
+  if (!loaded) {
+    return (
+      <div style={{ minHeight: "100vh", background: "#1B2430", color: "#5C6B7A", fontFamily: "'Courier New', monospace", fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        cargando registro de hoy...
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#1B2430", color: "#E8E3D8", fontFamily: "'Georgia', 'Times New Roman', serif", display: "flex", justifyContent: "center", padding: "48px 20px" }}>
+      <div style={{ width: "100%", maxWidth: 560 }}>
+        <div style={{ borderBottom: "2px solid #4C7A7A", paddingBottom: 16, marginBottom: 20 }}>
+          <div style={{ fontFamily: "'Courier New', monospace", fontSize: 12, letterSpacing: 1, color: "#4C7A7A", marginBottom: 6, textTransform: "capitalize" }}>{today}</div>
+          <h1 style={{ fontSize: 34, margin: 0, fontWeight: 400, letterSpacing: 0.5 }}>Bitácora de tareas</h1>
+        </div>
+
+        {totalCount > 0 && (
+          <div style={{ marginBottom: 24 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontFamily: "'Courier New', monospace", fontSize: 11, color: "#5C6B7A", marginBottom: 6 }}>
+              <span>{doneCount} de {totalCount} completadas</span>
+              <span>{progressPct}%</span>
+            </div>
+            <div style={{ height: 6, background: "#232D3D", width: "100%" }}>
+              <div style={{ height: "100%", width: `${progressPct}%`, background: "#D4A017", transition: "width 0.3s ease" }} />
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 16, fontFamily: "'Courier New', monospace" }}>
+          <div style={{ flex: 1, display: "flex", alignItems: "center", background: "#232D3D", border: "1px solid #3A4759", padding: "10px 14px" }}>
+            <span style={{ color: "#D4A017", marginRight: 8 }}>{">"}</span>
+            <input
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && addTask()}
+              placeholder="anotar nueva tarea..."
+              style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: "#E8E3D8", fontSize: 15, fontFamily: "'Courier New', monospace" }}
+            />
+          </div>
+          <select
+            value={draftCategory}
+            onChange={(e) => setDraftCategory(e.target.value)}
+            style={{ background: "#232D3D", border: "1px solid #3A4759", color: "#E8E3D8", fontFamily: "'Courier New', monospace", fontSize: 13, padding: "0 8px" }}
+          >
+            {Object.keys(CATEGORIES).map((cat) => <option key={cat} value={cat}>{cat}</option>)}
+          </select>
+          <button onClick={addTask} style={{ background: "#D4A017", border: "none", color: "#1B2430", width: 42, cursor: "pointer", fontSize: 18, fontWeight: "bold" }}>+</button>
+        </div>
+
+        <div style={{ display: "flex", gap: 4, marginBottom: 20, fontFamily: "'Courier New', monospace", fontSize: 12 }}>
+          {[["all", "todas"], ["pending", "pendientes"], ["done", "hechas"]].map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setFilter(key)}
+              style={{ background: filter === key ? "#4C7A7A" : "transparent", color: filter === key ? "#E8E3D8" : "#5C6B7A", border: "1px solid #3A4759", padding: "5px 12px", cursor: "pointer" }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div>
+          {visibleTasks.length === 0 && (
+            <div style={{ color: "#5C6B7A", fontFamily: "'Courier New', monospace", fontSize: 13, padding: "20px 0" }}>-- registro vacío --</div>
+          )}
+          {visibleTasks.map((task) => (
+            <div
+              key={task.id}
+              draggable
+              onDragStart={() => setDragId(task.id)}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={() => handleDrop(task.id)}
+              style={{ borderBottom: "1px solid #2A3547", opacity: dragId === task.id ? 0.5 : 1 }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 0" }}>
+                <span style={{ color: "#3A4759", cursor: "grab", fontSize: 14 }}>⋮⋮</span>
+
+                <button
+                  onClick={() => updateTask(task.id, { done: !task.done })}
+                  style={{ width: 22, height: 22, flexShrink: 0, border: `1.5px solid ${task.done ? "#4C7A7A" : "#5C6B7A"}`, background: task.done ? "#4C7A7A" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#E8E3D8", fontSize: 13 }}
+                >
+                  {task.done && "✓"}
+                </button>
+
+                <button onClick={() => updateTask(task.id, { priority: !task.priority })} style={{ background: "none", border: "none", cursor: "pointer", padding: 2, fontSize: 16, color: task.priority ? "#D4A017" : "#3A4759" }}>
+                  {task.priority ? "★" : "☆"}
+                </button>
+
+                <span style={{ fontFamily: "'Courier New', monospace", fontSize: 10, color: CATEGORIES[task.category] || "#5C6B7A", border: `1px solid ${CATEGORIES[task.category] || "#5C6B7A"}`, padding: "2px 6px", flexShrink: 0 }}>
+                  {task.category}
+                </span>
+
+                {editingId === task.id ? (
+                  <input
+                    autoFocus
+                    value={editingText}
+                    onChange={(e) => setEditingText(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && commitEdit(task.id)}
+                    onBlur={() => commitEdit(task.id)}
+                    style={{ flex: 1, background: "#232D3D", border: "1px solid #4C7A7A", color: "#E8E3D8", fontSize: 15, fontFamily: "'Georgia', serif", padding: "4px 8px" }}
+                  />
+                ) : (
+                  <span
+                    onDoubleClick={() => startEdit(task)}
+                    style={{ flex: 1, fontSize: 16, color: task.done ? "#5C6B7A" : "#E8E3D8", textDecoration: task.done ? "line-through" : "none", cursor: "text" }}
+                  >
+                    {task.text}
+                  </span>
+                )}
+
+                <button onClick={() => startEdit(task)} style={{ background: "none", border: "none", color: "#5C6B7A", cursor: "pointer", padding: 4, fontSize: 13 }}>✎</button>
+                <button onClick={() => updateTask(task.id, { expanded: !task.expanded })} style={{ background: "none", border: "none", color: "#5C6B7A", cursor: "pointer", padding: 4, fontSize: 13 }}>
+                  {task.expanded ? "▾" : "▸"}
+                </button>
+                <button
+                  onClick={() => removeTask(task.id)}
+                  style={{ background: "none", border: "none", color: "#5C6B7A", cursor: "pointer", padding: 4, fontSize: 13 }}
+                  onMouseEnter={(e) => (e.currentTarget.style.color = "#B85C5C")}
+                  onMouseLeave={(e) => (e.currentTarget.style.color = "#5C6B7A")}
+                >
+                  🗑
+                </button>
+              </div>
+
+              {task.expanded && (
+                <div style={{ padding: "4px 0 16px 46px", display: "flex", flexDirection: "column", gap: 10 }}>
+                  <textarea
+                    value={task.note}
+                    onChange={(e) => updateTask(task.id, { note: e.target.value })}
+                    placeholder="agregar una nota..."
+                    rows={2}
+                    style={{ background: "#232D3D", border: "1px solid #3A4759", color: "#E8E3D8", fontFamily: "'Courier New', monospace", fontSize: 12, padding: 8, resize: "vertical" }}
+                  />
+                  <div>
+                    {(task.subtasks || []).map((sub) => (
+                      <div key={sub.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}>
+                        <button
+                          onClick={() => toggleSubtask(task.id, sub.id)}
+                          style={{ width: 16, height: 16, border: `1.5px solid ${sub.done ? "#4C7A7A" : "#5C6B7A"}`, background: sub.done ? "#4C7A7A" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0, fontSize: 10, color: "#E8E3D8" }}
+                        >
+                          {sub.done && "✓"}
+                        </button>
+                        <span style={{ fontSize: 14, color: sub.done ? "#5C6B7A" : "#E8E3D8", textDecoration: sub.done ? "line-through" : "none", flex: 1 }}>{sub.text}</span>
+                        <button onClick={() => removeSubtask(task.id, sub.id)} style={{ background: "none", border: "none", color: "#3A4759", cursor: "pointer", fontSize: 11 }}>🗑</button>
+                      </div>
+                    ))}
+                    <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                      <input
+                        value={subtaskDrafts[task.id] || ""}
+                        onChange={(e) => setSubtaskDrafts({ ...subtaskDrafts, [task.id]: e.target.value })}
+                        onKeyDown={(e) => e.key === "Enter" && addSubtask(task.id)}
+                        placeholder="agregar paso..."
+                        style={{ flex: 1, background: "#232D3D", border: "1px solid #3A4759", color: "#E8E3D8", fontFamily: "'Courier New', monospace", fontSize: 12, padding: "6px 8px" }}
+                      />
+                      <button onClick={() => addSubtask(task.id)} style={{ background: "#3A4759", border: "none", color: "#E8E3D8", padding: "0 10px", cursor: "pointer", fontSize: 14 }}>+</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div style={{ marginTop: 20, fontFamily: "'Courier New', monospace", fontSize: 12, color: "#5C6B7A", letterSpacing: 0.5 }}>
+          {totalCount === 0 ? "-- comenzá anotando tu primera tarea --" : pending === 0 ? "todo listo por hoy" : `${pending} tarea${pending === 1 ? "" : "s"} pendiente${pending === 1 ? "" : "s"}`}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<FieldLog />);
+</script>
+</body>
+</html>
